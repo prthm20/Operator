@@ -157,3 +157,41 @@ Same order as input. No explanation, no markdown.`
     return emails.map(() => 'low');
   }
 }
+
+export async function loadMoreEmails(offset: number = 5) {
+  const { tenant } = await getTenant();
+
+  const threadsRes = await tenant.gmail.api.threads.list({ maxResults: 15 });
+  const allThreads = threadsRes?.threads || [];
+  const batch = allThreads.slice(offset, offset + 15);
+
+  const threadDetails = await Promise.allSettled(
+    batch.map((t: any) => tenant.gmail.api.threads.get({ id: t.id }))
+  );
+
+  const rawThreads = threadDetails
+    .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
+    .map((r) => {
+      const t = r.value;
+      const firstMsg = t.messages?.[0];
+      const headers = firstMsg?.payload?.headers || [];
+      const get = (name: string) => headers.find((h: any) => h.name === name)?.value || '';
+      return {
+        id: t.id,
+        from: get('From'),
+        subject: get('Subject'),
+        snippet: firstMsg?.snippet || '',
+        date: get('Date'),
+        priority: 'low' as const,
+      };
+    });
+
+  const priorities = await classifyEmailPriorities(
+    rawThreads.map(t => ({ id: t.id, from: t.from, subject: t.subject, snippet: t.snippet }))
+  );
+
+  return rawThreads.map((t, i) => ({
+    ...t,
+    priority: (['high', 'med', 'low'].includes(priorities[i]) ? priorities[i] : 'low') as 'high' | 'med' | 'low',
+  }));
+}

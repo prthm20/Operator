@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { sendEmail, archiveEmail, createCalendarEvent, getSentEmails, getDraftEmails, getEmailBody } from './actions';
+import { sendEmail, archiveEmail, createCalendarEvent, getSentEmails, getDraftEmails, getEmailBody,loadMoreEmails } from './actions';
 
 const C = {
   bg: '#0A0C0A', surface: '#141A12', border: '#2A3828',
@@ -58,6 +58,7 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
   const [loadingView, setLoadingView] = useState(false);
   const [emailBody, setEmailBody] = useState<any[]>([]);
   const [loadingBody, setLoadingBody] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
@@ -204,7 +205,33 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [selected, filtered, handleArchive]);
+  
+  useEffect(() => {
+  if (emails.length === 0) return;
 
+  const fetchMore = async () => {
+    setLoadingMore(true);
+    try {
+      const more = await loadMoreEmails(5);
+      const mapped: Email[] = more.map((t: any) => ({
+        id: t.id,
+        from: t.from || 'UNKNOWN',
+        subject: t.subject || '(NO SUBJECT)',
+        snippet: t.snippet || '',
+        priority: t.priority,
+        time: t.date || 'RECENT',
+      }));
+      setEmails(prev => {
+        const existingIds = new Set(prev.map(e => e.id));
+        const newEmails = mapped.filter(e => !existingIds.has(e.id));
+        return [...prev, ...newEmails];
+      });
+    } catch { }
+    setLoadingMore(false);
+  };
+
+  fetchMore();
+}, [emails.length > 0]);
   const groups: { label: string; p: Priority }[] = [
     { label: 'PRIORITY ALPHA', p: 'high' },
     { label: 'PRIORITY BRAVO', p: 'med' },
@@ -330,6 +357,12 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
               )}
             </>
           )}
+
+          {loadingMore && (
+  <div style={{ padding: '10px 12px', fontSize: 10, color: C.muted, letterSpacing: 2, textAlign: 'center' }}>
+    // LOADING MORE INTEL...
+  </div>
+)}
         </div>
 
         {/* Email Detail */}
