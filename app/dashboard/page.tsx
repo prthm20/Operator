@@ -15,28 +15,33 @@ export default async function DashboardPage() {
 
   try {
     const tenant = corsair.withTenant(user.id) as any;
+
     const [threadsRes, eventsRes] = await Promise.all([
-      tenant.gmail.api.threads.list({}),
+      tenant.gmail.api.threads.list({ maxResults: 5 }),
       tenant.googlecalendar.api.events.getMany({}),
     ]);
 
-    const threadList = threadsRes?.threads?.slice(0, 20) || [];
-    const threadDetails = await Promise.all(
+    const threadList = threadsRes?.threads?.slice(0, 5) || [];
+
+    const threadDetails = await Promise.allSettled(
       threadList.map((t: any) => tenant.gmail.api.threads.get({ id: t.id }))
     );
 
-    const rawThreads = threadDetails.map((t: any) => {
-      const firstMsg = t.messages?.[0];
-      const headers = firstMsg?.payload?.headers || [];
-      const get = (name: string) => headers.find((h: any) => h.name === name)?.value || '';
-      return {
-        id: t.id,
-        from: get('From'),
-        subject: get('Subject'),
-        snippet: firstMsg?.snippet || '',
-        date: get('Date'),
-      };
-    });
+    const rawThreads = threadDetails
+      .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
+      .map((r) => {
+        const t = r.value;
+        const firstMsg = t.messages?.[0];
+        const headers = firstMsg?.payload?.headers || [];
+        const get = (name: string) => headers.find((h: any) => h.name === name)?.value || '';
+        return {
+          id: t.id,
+          from: get('From'),
+          subject: get('Subject'),
+          snippet: firstMsg?.snippet || '',
+          date: get('Date'),
+        };
+      });
 
     const priorities = await classifyEmailPriorities(
       rawThreads.map(t => ({ id: t.id, from: t.from, subject: t.subject, snippet: t.snippet }))
@@ -54,13 +59,13 @@ export default async function DashboardPage() {
 
   if (needsConnect) {
     return (
-      <main style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0D0A0E', color: '#F5E6D3', fontFamily: 'Inter, sans-serif' }}>
+      <main style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0A0C0A', color: '#D4D9C8', fontFamily: 'Share Tech Mono, monospace' }}>
         <div style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <h1 style={{ fontFamily: 'Playfair Display, serif', fontSize: 28, color: '#F5A623' }}>✦ Operator</h1>
-          <p style={{ color: '#8B7355' }}>Connect your accounts to get started</p>
+          <h1 style={{ fontFamily: 'Courier Prime, monospace', fontSize: 28, color: '#C8A84B', letterSpacing: 4 }}>⬡ OPERATOR</h1>
+          <p style={{ color: '#6B7560', letterSpacing: 2, fontSize: 11 }}>// AUTHENTICATION REQUIRED</p>
           <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
-            <a href="/api/connect?plugin=gmail" style={{ background: '#F5A623', color: '#0D0A0E', padding: '10px 20px', borderRadius: 8, fontWeight: 500, textDecoration: 'none' }}>Connect Gmail</a>
-            <a href="/api/connect?plugin=googlecalendar" style={{ background: '#E91E8C', color: '#fff', padding: '10px 20px', borderRadius: 8, fontWeight: 500, textDecoration: 'none' }}>Connect Calendar</a>
+            <a href="/api/connect?plugin=gmail" style={{ background: 'transparent', border: '1px solid #4A7C59', color: '#4A7C59', padding: '10px 20px', borderRadius: 2, fontWeight: 500, textDecoration: 'none', fontFamily: 'Share Tech Mono, monospace', fontSize: 12, letterSpacing: 1 }}>[ CONNECT GMAIL ]</a>
+            <a href="/api/connect?plugin=googlecalendar" style={{ background: 'transparent', border: '1px solid #C8A84B', color: '#C8A84B', padding: '10px 20px', borderRadius: 2, fontWeight: 500, textDecoration: 'none', fontFamily: 'Share Tech Mono, monospace', fontSize: 12, letterSpacing: 1 }}>[ CONNECT CALENDAR ]</a>
           </div>
         </div>
       </main>
