@@ -231,7 +231,7 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
   };
 
   fetchMore();
-}, [emails.length > 0]);
+}, [emails.length]);
   const groups: { label: string; p: Priority }[] = [
     { label: 'PRIORITY ALPHA', p: 'high' },
     { label: 'PRIORITY BRAVO', p: 'med' },
