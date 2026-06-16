@@ -2,7 +2,6 @@ import { createClient } from '@/lib/supabase/server';
 import { corsair } from '@/server/corsair';
 import { redirect } from 'next/navigation';
 import InboxClient from './inbox-client';
-import { classifyEmailPriorities } from './actions';
 
 export default async function DashboardPage() {
   const supabase = await createClient();
@@ -27,7 +26,7 @@ export default async function DashboardPage() {
       threadList.map((t: any) => tenant.gmail.api.threads.get({ id: t.id }))
     );
 
-    const rawThreads = threadDetails
+    threads = threadDetails
       .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
       .map((r) => {
         const t = r.value;
@@ -40,17 +39,9 @@ export default async function DashboardPage() {
           subject: get('Subject'),
           snippet: firstMsg?.snippet || '',
           date: get('Date'),
+          priority: 'low' as const, // classified client-side
         };
       });
-
-    const priorities = await classifyEmailPriorities(
-      rawThreads.map(t => ({ id: t.id, from: t.from, subject: t.subject, snippet: t.snippet }))
-    );
-
-    threads = rawThreads.map((t, i) => ({
-      ...t,
-      priority: (['high', 'med', 'low'].includes(priorities[i]) ? priorities[i] : 'low') as 'high' | 'med' | 'low',
-    }));
 
     events = eventsRes?.items || [];
   } catch (e: any) {

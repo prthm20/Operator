@@ -1,7 +1,26 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { sendEmail, archiveEmail, createCalendarEvent, getSentEmails, getDraftEmails, getEmailBody,loadMoreEmails } from './actions';
+import { sendEmail, archiveEmail, createCalendarEvent, getSentEmails, getDraftEmails, getEmailBody, loadMoreEmails, classifyEmailPriorities } from './actions';
+
+const CACHE_KEY = 'op_priorities';
+const CACHE_TTL = 1000 * 60 * 30;
+
+function getCachedPriorities(): Record<string, string> | null {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const { data, timestamp } = JSON.parse(raw);
+    if (Date.now() - timestamp > CACHE_TTL) return null;
+    return data;
+  } catch { return null; }
+}
+
+function setCachedPriorities(data: Record<string, string>) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() }));
+  } catch { }
+}
 
 const C = {
   bg: '#0A0C0A', surface: '#141A12', border: '#2A3828',
@@ -63,12 +82,12 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
   useEffect(() => {
-    const mapped: Email[] = threads.map((t: any, i: number) => ({
+    const mapped: Email[] = threads.map((t: any) => ({
       id: t.id,
       from: t.from || 'UNKNOWN',
       subject: t.subject || '(NO SUBJECT)',
       snippet: t.snippet || '',
-      priority: t.priority || (i < 3 ? 'high' : i < 7 ? 'med' : 'low'),
+      priority: t.priority || 'low',
       time: t.date || 'RECENT',
     }));
     setEmails(mapped);
@@ -84,6 +103,27 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
   }, [threads, events]);
 
   useEffect(() => {
+    if (emails.length === 0) return;
+    const cached = getCachedPriorities();
+    if (cached) {
+      setEmails(prev => prev.map(e => ({ ...e, priority: (cached[e.id] || 'low') as Priority })));
+      return;
+    }
+    const classify = async () => {
+      try {
+        const priorities = await classifyEmailPriorities(
+          emails.map(e => ({ id: e.id, from: e.from, subject: e.subject, snippet: e.snippet }))
+        );
+        const map: Record<string, string> = {};
+        emails.forEach((e, i) => { map[e.id] = priorities[i] || 'low'; });
+        setCachedPriorities(map);
+        setEmails(prev => prev.map(e => ({ ...e, priority: (map[e.id] || 'low') as Priority })));
+      } catch { }
+    };
+    classify();
+  }, [emails.length]);
+
+  useEffect(() => {
     const q = search.toLowerCase();
     setFiltered(q ? emails.filter(e =>
       e.from.toLowerCase().includes(q) ||
@@ -91,6 +131,26 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
       e.snippet.toLowerCase().includes(q)
     ) : emails);
   }, [search, emails]);
+
+  useEffect(() => {
+    if (emails.length === 0) return;
+    const fetchMore = async () => {
+      setLoadingMore(true);
+      try {
+        const more = await loadMoreEmails(5);
+        const mapped: Email[] = more.map((t: any) => ({
+          id: t.id, from: t.from || 'UNKNOWN', subject: t.subject || '(NO SUBJECT)',
+          snippet: t.snippet || '', priority: t.priority, time: t.date || 'RECENT',
+        }));
+        setEmails(prev => {
+          const existingIds = new Set(prev.map(e => e.id));
+          return [...prev, ...mapped.filter(e => !existingIds.has(e.id))];
+        });
+      } catch { }
+      setLoadingMore(false);
+    };
+    fetchMore();
+  }, [emails.length]);
 
   const handleArchive = useCallback(async (id: string) => {
     await archiveEmail(id);
@@ -103,10 +163,7 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
     setSelected(e);
     setEmailBody([]);
     setLoadingBody(true);
-    try {
-      const messages = await getEmailBody(e.id);
-      setEmailBody(messages);
-    } catch { }
+    try { const messages = await getEmailBody(e.id); setEmailBody(messages); } catch { }
     setLoadingBody(false);
   };
 
@@ -139,22 +196,17 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
     setAgentResult('');
     try {
       const res = await fetch('/api/agent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: agentPrompt }),
       });
       const data = await res.json();
       setAgentResult(data.result || '// MISSION COMPLETE');
-    } catch {
-      setAgentResult('// AGENT COMM FAILURE');
-    }
+    } catch { setAgentResult('// AGENT COMM FAILURE'); }
     setAgentLoading(false);
   };
 
   const handleNavClick = async (nav: 'inbox' | 'sent' | 'drafts') => {
-    setView(nav);
-    setSelected(null);
-    setEmailBody([]);
+    setView(nav); setSelected(null); setEmailBody([]);
     if (nav === 'sent' && sentEmails.length === 0) {
       setLoadingView(true);
       const data = await getSentEmails();
@@ -162,8 +214,7 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
         id: m.id,
         from: m.payload?.headers?.find((h: any) => h.name === 'To')?.value || 'UNKNOWN',
         subject: m.payload?.headers?.find((h: any) => h.name === 'Subject')?.value || '(NO SUBJECT)',
-        snippet: m.snippet || '',
-        priority: 'low' as Priority,
+        snippet: m.snippet || '', priority: 'low' as Priority,
         time: m.payload?.headers?.find((h: any) => h.name === 'Date')?.value || 'SENT',
       })));
       setLoadingView(false);
@@ -172,12 +223,9 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
       setLoadingView(true);
       const data = await getDraftEmails();
       setDraftEmails(data.map((d: any) => ({
-        id: d.id,
-        from: 'SELF',
+        id: d.id, from: 'SELF',
         subject: d.message?.payload?.headers?.find((h: any) => h.name === 'Subject')?.value || '(NO SUBJECT)',
-        snippet: d.message?.snippet || '',
-        priority: 'low' as Priority,
-        time: 'DRAFT',
+        snippet: d.message?.snippet || '', priority: 'low' as Priority, time: 'DRAFT',
       })));
       setLoadingView(false);
     }
@@ -205,33 +253,7 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [selected, filtered, handleArchive]);
-  
-  useEffect(() => {
-  if (emails.length === 0) return;
 
-  const fetchMore = async () => {
-    setLoadingMore(true);
-    try {
-      const more = await loadMoreEmails(5);
-      const mapped: Email[] = more.map((t: any) => ({
-        id: t.id,
-        from: t.from || 'UNKNOWN',
-        subject: t.subject || '(NO SUBJECT)',
-        snippet: t.snippet || '',
-        priority: t.priority,
-        time: t.date || 'RECENT',
-      }));
-      setEmails(prev => {
-        const existingIds = new Set(prev.map(e => e.id));
-        const newEmails = mapped.filter(e => !existingIds.has(e.id));
-        return [...prev, ...newEmails];
-      });
-    } catch { }
-    setLoadingMore(false);
-  };
-
-  fetchMore();
-}, [emails.length]);
   const groups: { label: string; p: Priority }[] = [
     { label: 'PRIORITY ALPHA', p: 'high' },
     { label: 'PRIORITY BRAVO', p: 'med' },
@@ -239,7 +261,6 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
   ];
 
   const activeEmails = view === 'inbox' ? filtered : view === 'sent' ? sentEmails : draftEmails;
-
   const navItems = [
     { icon: '📥', label: 'INBOX', nav: 'inbox' as const },
     { icon: '📤', label: 'SENT', nav: 'sent' as const },
@@ -252,38 +273,26 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
 
   return (
     <div style={{ background: C.bg, color: C.text, height: '100vh', display: 'flex', flexDirection: 'column', fontFamily: FONT_MONO, position: 'relative' }}>
-
-      {/* Google Fonts */}
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Courier+Prime:wght@400;700&display=swap');`}</style>
 
-      {/* Toast */}
       {toast && (
         <div style={{ position: 'fixed', bottom: 24, right: 24, background: C.surface, border: `1px solid ${C.green}`, color: C.green, padding: '10px 18px', borderRadius: 2, fontWeight: 700, fontSize: 12, zIndex: 100, letterSpacing: 1 }}>
           {toast}
         </div>
       )}
 
-      {/* Topbar */}
       <div style={{ background: '#0D110C', borderBottom: `2px solid ${C.green}`, padding: '0 16px', height: 48, display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
         <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.1, marginRight: 8 }}>
           <span style={{ fontFamily: FONT_COURIER, fontSize: 15, color: C.gold, letterSpacing: 3, fontWeight: 700 }}>⬡ OPERATOR</span>
           <span style={{ fontSize: 8, color: C.muted, letterSpacing: 2 }}>SECURE MAIL SYS v2.6</span>
         </div>
-        <input
-          id="op-search"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder="// SEARCH INTEL DATABASE..."
-          style={{ flex: 1, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, padding: '6px 12px', color: C.text, fontSize: 12, outline: 'none', fontFamily: FONT_MONO }}
-        />
+        <input id="op-search" value={search} onChange={e => setSearch(e.target.value)} placeholder="// SEARCH INTEL DATABASE..."
+          style={{ flex: 1, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, padding: '6px 12px', color: C.text, fontSize: 12, outline: 'none', fontFamily: FONT_MONO }} />
         <button onClick={() => setShowCompose(true)} style={btnPrimaryStyle}>[ COMPOSE ]</button>
         <button onClick={() => setShowAgent(true)} style={{ ...btnStyle, borderColor: C.gold, color: C.gold }}>⬡ AGENT</button>
       </div>
 
-      {/* Body */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-
-        {/* Sidebar */}
         <div style={{ width: 170, background: C.bg, borderRight: `1px solid ${C.border}`, padding: '10px 6px', display: 'flex', flexDirection: 'column', gap: 1, flexShrink: 0, overflowY: 'auto' }}>
           {navItems.map(item => (
             <div key={item.label} onClick={() => handleNavClick(item.nav)}
@@ -291,17 +300,14 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
               {item.icon} {item.label}
             </div>
           ))}
-
           <hr style={{ border: 'none', borderTop: `1px solid ${C.border}`, margin: '6px 0' }} />
           <div style={{ fontSize: 9, color: C.muted, padding: '4px 10px', letterSpacing: 2 }}>// OPERATIONS</div>
-
           {calEvents.map(ev => (
             <div key={ev.id} style={{ padding: '5px 10px', cursor: 'pointer' }}>
               <div style={{ fontSize: 11, color: ev.color, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>▶ {ev.name}</div>
               <div style={{ fontSize: 10, color: C.muted, marginTop: 1 }}>{ev.time}</div>
             </div>
           ))}
-
           <hr style={{ border: 'none', borderTop: `1px solid ${C.border}`, margin: '6px 0' }} />
           <button onClick={() => setShowEventModal(true)}
             style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.muted, padding: '5px 8px', fontSize: 10, cursor: 'pointer', fontFamily: FONT_MONO, letterSpacing: 1, textAlign: 'left', margin: '0 4px' }}>
@@ -309,7 +315,6 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
           </button>
         </div>
 
-        {/* Email List */}
         <div style={{ width: 270, borderRight: `1px solid ${C.border}`, overflowY: 'auto', flexShrink: 0 }}>
           {view === 'inbox' ? (
             groups.map(g => {
@@ -357,15 +362,11 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
               )}
             </>
           )}
-
           {loadingMore && (
-  <div style={{ padding: '10px 12px', fontSize: 10, color: C.muted, letterSpacing: 2, textAlign: 'center' }}>
-    // LOADING MORE INTEL...
-  </div>
-)}
+            <div style={{ padding: '10px 12px', fontSize: 10, color: C.muted, letterSpacing: 2, textAlign: 'center' }}>// LOADING MORE INTEL...</div>
+          )}
         </div>
 
-        {/* Email Detail */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           {!selected ? (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: C.muted, gap: 8 }}>
@@ -397,15 +398,19 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
                           <span style={{ color: C.green }}>{msg.from}</span> · {msg.date}
                         </div>
                       )}
-                      <span style={{ color: C.muted }}>// BEGIN TRANSMISSION //<br/><br/></span>
+                      <span style={{ color: C.muted }}>// BEGIN TRANSMISSION //<br /><br /></span>
                       <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                         {msg.body.replace(/<[^>]*>/g, '').trim()}
                       </div>
-                      <br/><span style={{ color: C.muted }}>// END TRANSMISSION //</span>
+                      <br /><span style={{ color: C.muted }}>// END TRANSMISSION //</span>
                     </div>
                   ))
                 ) : (
-                  <div><span style={{ color: C.muted }}>// BEGIN TRANSMISSION //<br/><br/></span>{selected?.snippet}<br/><br/><span style={{ color: C.muted }}>// END TRANSMISSION //</span></div>
+                  <div>
+                    <span style={{ color: C.muted }}>// BEGIN TRANSMISSION //<br /><br /></span>
+                    {selected?.snippet}
+                    <br /><br /><span style={{ color: C.muted }}>// END TRANSMISSION //</span>
+                  </div>
                 )}
               </div>
               <div style={{ display: 'flex', gap: 6, padding: '10px 18px', borderTop: `1px solid ${C.border}`, background: C.bg, flexShrink: 0 }}>
@@ -418,16 +423,14 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
         </div>
       </div>
 
-      {/* Shortcut bar */}
       <div style={{ padding: '4px 14px', background: C.bg, borderTop: `1px solid ${C.surface}`, display: 'flex', gap: 16, flexShrink: 0 }}>
-        {[['C','COMPOSE'],['J/K','NAVIGATE'],['R','REPLY'],['E','ARCHIVE'],['/','SEARCH']].map(([k, v]) => (
+        {[['C', 'COMPOSE'], ['J/K', 'NAVIGATE'], ['R', 'REPLY'], ['E', 'ARCHIVE'], ['/', 'SEARCH']].map(([k, v]) => (
           <span key={k} style={{ fontSize: 10, color: C.muted, display: 'flex', alignItems: 'center', gap: 4, letterSpacing: 1 }}>
             <span style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, padding: '1px 5px', fontFamily: FONT_MONO, fontSize: 9, color: C.green }}>{k}</span> {v}
           </span>
         ))}
       </div>
 
-      {/* Compose Modal */}
       {showCompose && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}>
           <div style={{ background: C.surface, border: `1px solid ${C.green}`, borderRadius: 2, width: 460, padding: 24 }}>
@@ -460,7 +463,6 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
         </div>
       )}
 
-      {/* New Event Modal */}
       {showEventModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}>
           <div style={{ background: C.surface, border: `1px solid ${C.gold}`, borderRadius: 2, width: 420, padding: 24 }}>
@@ -491,7 +493,6 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
         </div>
       )}
 
-      {/* Agent Modal */}
       {showAgent && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}>
           <div style={{ background: C.surface, border: `1px solid ${C.gold}`, borderRadius: 2, width: 520, padding: 24 }}>
@@ -510,15 +511,11 @@ export default function InboxClient({ threads, events, userEmail }: { threads: a
                 ▶ {ex}
               </div>
             ))}
-            <textarea
-              value={agentPrompt}
-              onChange={e => setAgentPrompt(e.target.value)}
-              placeholder="// Enter command..."
-              style={{ ...inputStyle, resize: 'none', height: 80, marginTop: 12 }}
-            />
+            <textarea value={agentPrompt} onChange={e => setAgentPrompt(e.target.value)} placeholder="// Enter command..."
+              style={{ ...inputStyle, resize: 'none', height: 80, marginTop: 12 }} />
             {agentResult && (
               <div style={{ background: '#0A1A0A', border: `1px solid ${C.green}`, borderRadius: 2, padding: 12, fontSize: 12, color: C.green, marginTop: 12, whiteSpace: 'pre-wrap', fontFamily: FONT_MONO }}>
-                <span style={{ color: C.muted }}>// AGENT RESPONSE //<br/></span>
+                <span style={{ color: C.muted }}>// AGENT RESPONSE //<br /></span>
                 {agentResult}
               </div>
             )}
